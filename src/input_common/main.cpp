@@ -17,6 +17,7 @@
 #include "input_common/sdl/sdl_impl.h"
 #include "input_common/touch_from_button.h"
 #include "input_common/udp/udp.h"
+#include "input_common/web_input/web_input.h"
 
 namespace InputCommon {
 
@@ -29,6 +30,7 @@ static std::shared_ptr<Keyboard> keyboard;
 static std::shared_ptr<MotionEmu> motion_emu;
 static std::unique_ptr<CemuhookUDP::State> udp;
 static std::unique_ptr<SDL::State> sdl;
+static std::unique_ptr<WebInput::Server> web_input_server;
 
 void Init() {
 #ifdef ENABLE_GCADAPTER
@@ -50,6 +52,8 @@ void Init() {
     sdl = SDL::Init();
 
     udp = CemuhookUDP::Init();
+
+    web_input_server = std::make_unique<WebInput::Server>();
 }
 
 void Shutdown() {
@@ -68,6 +72,7 @@ void Shutdown() {
     Input::UnregisterFactory<Input::TouchDevice>("touch_from_button");
     sdl.reset();
     udp.reset();
+    web_input_server.reset();
 }
 
 Keyboard* GetKeyboard() {
@@ -128,6 +133,10 @@ Common::ParamPackage GetControllerAnalogBinds(const Common::ParamPackage& params
     }
 #endif
     return {};
+}
+
+WebInput::Server* GetWebInputServer() {
+    return web_input_server.get();
 }
 
 void ReloadInputDevices() {

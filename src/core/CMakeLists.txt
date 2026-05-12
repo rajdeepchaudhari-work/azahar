@@ -90,6 +90,7 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
     file_sys/path_parser.cpp
     file_sys/path_parser.h
     file_sys/plugin_3gx.cpp
+    file_sys/decrypted_romfs_reader.h
     file_sys/plugin_3gx.h
     file_sys/plugin_3gx_bootloader.h
     file_sys/romfs_reader.cpp

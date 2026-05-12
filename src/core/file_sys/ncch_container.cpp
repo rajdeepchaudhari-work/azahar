@@ -8,6 +8,7 @@
 #include <cryptopp/aes.h>
 #include <cryptopp/modes.h>
 #include <cryptopp/sha.h>
+#include "core/file_sys/decrypted_romfs_reader.h"
 #include "common/common_types.h"
 #include "common/logging/log.h"
 #include "common/zstd_compression.h"
@@ -133,6 +134,122 @@ Loader::ResultStatus NCCHContainer::OpenFile(const std::string& filepath_, u32 n
     return Loader::ResultStatus::Success;
 }
 
+bool NCCHContainer::SetupDecryption() {
+    using namespace HW::AES;
+    InitKeys();
+
+    if (ncch_header.fixed_key) {
+        primary_key.fill(0);
+        secondary_key.fill(0);
+    } else {
+        AESKey key_y_primary{};
+        std::copy(std::begin(ncch_header.signature), std::begin(ncch_header.signature) + 16,
+                  key_y_primary.begin());
+
+        AESKey key_y_secondary = key_y_primary;
+        if (ncch_header.seed_crypto) {
+            auto opt = FileSys::GetSeed(ncch_header.program_id);
+            if (!opt) {
+                LOG_ERROR(Service_FS, "NCCH seed for {:016X} not found", ncch_header.program_id);
+                return false;
+            }
+            std::array<u8, 32> seed_input{};
+            std::memcpy(seed_input.data(),      key_y_primary.data(), 16);
+            std::memcpy(seed_input.data() + 16, opt->data(),           16);
+            std::array<u8, CryptoPP::SHA256::DIGESTSIZE> hash{};
+            CryptoPP::SHA256().CalculateDigest(hash.data(), seed_input.data(), 32);
+            std::memcpy(key_y_secondary.data(), hash.data(), 16);
+        }
+
+        SetKeyY(KeySlotID::NCCHSecure1, key_y_primary);
+        if (!IsNormalKeyAvailable(KeySlotID::NCCHSecure1)) {
+            LOG_ERROR(Service_FS, "Encrypted NCCH: slot 0x2C KeyX missing");
+            return false;
+        }
+        primary_key = GetNormalKey(KeySlotID::NCCHSecure1);
+
+        std::size_t secondary_slot = KeySlotID::NCCHSecure1;
+        switch (ncch_header.secondary_key_slot) {
+        case 0:  secondary_slot = KeySlotID::NCCHSecure1; break;
+        case 1:  secondary_slot = KeySlotID::NCCHSecure2; break;
+        case 10: secondary_slot = KeySlotID::NCCHSecure3; break;
+        case 11: secondary_slot = KeySlotID::NCCHSecure4; break;
+        default:
+            LOG_ERROR(Service_FS, "Unknown secondary key slot {}", ncch_header.secondary_key_slot);
+            return false;
+        }
+        SetKeyY(secondary_slot, key_y_secondary);
+        if (!IsNormalKeyAvailable(secondary_slot)) {
+            LOG_ERROR(Service_FS, "Encrypted NCCH: secondary KeyX missing for slot {:02X}",
+                      secondary_slot);
+            return false;
+        }
+        secondary_key = GetNormalKey(secondary_slot);
+    }
+
+    // Derive AES-CTR counters per section
+    if (ncch_header.version == 0 || ncch_header.version == 2) {
+        std::reverse_copy(std::begin(ncch_header.partition_id),
+                          std::begin(ncch_header.partition_id) + 8,
+                          exheader_ctr.begin());
+        std::fill(exheader_ctr.begin() + 8, exheader_ctr.end(), 0);
+        exefs_ctr   = exheader_ctr;
+        romfs_ctr   = exheader_ctr;
+        exheader_ctr[8] = 1;
+        exefs_ctr[8]    = 2;
+        romfs_ctr[8]    = 3;
+    } else if (ncch_header.version == 1) {
+        std::copy(std::begin(ncch_header.partition_id),
+                  std::begin(ncch_header.partition_id) + 8,
+                  exheader_ctr.begin());
+        std::fill(exheader_ctr.begin() + 8, exheader_ctr.end(), 0);
+        exefs_ctr = exheader_ctr;
+        romfs_ctr = exheader_ctr;
+
+        auto u32be = [](u32 v) {
+            return std::array<u8, 4>{u8(v >> 24), u8((v >> 16) & 0xFF),
+                                     u8((v >> 8) & 0xFF),  u8(v & 0xFF)};
+        };
+        auto off_exh  = u32be(0x200);
+        auto off_exfs = u32be(static_cast<u32>(ncch_header.exefs_offset) * kBlockSize);
+        auto off_rfs  = u32be(static_cast<u32>(ncch_header.romfs_offset) * kBlockSize);
+        std::copy(off_exh.begin(),  off_exh.end(),  exheader_ctr.begin() + 12);
+        std::copy(off_exfs.begin(), off_exfs.end(), exefs_ctr.begin()    + 12);
+        std::copy(off_rfs.begin(),  off_rfs.end(),  romfs_ctr.begin()    + 12);
+    } else {
+        LOG_ERROR(Service_FS, "Unknown NCCH version {}", static_cast<u16>(ncch_header.version));
+        return false;
+    }
+
+    is_encrypted = true;
+    return true;
+}
+
+void NCCHContainer::DecryptBuffer(std::vector<u8>& buf, NCCHSection section,
+                                  std::size_t offset_in_section) {
+    if (buf.empty())
+        return;
+
+    const AESKey* key = nullptr;
+    const AESKey* ctr = nullptr;
+
+    switch (section) {
+    case NCCHSection::ExHeader:
+        key = &primary_key;   ctr = &exheader_ctr; break;
+    case NCCHSection::ExeFS:
+        key = &primary_key;   ctr = &exefs_ctr;    break;
+    case NCCHSection::ExeFSSecondary:
+        key = &secondary_key; ctr = &exefs_ctr;    break;
+    case NCCHSection::RomFS:
+        key = &secondary_key; ctr = &romfs_ctr;    break;
+    }
+
+    CryptoPP::CTR_Mode<CryptoPP::AES>::Decryption d(key->data(), key->size(), ctr->data());
+    if (offset_in_section != 0)
+        d.Seek(offset_in_section);
+    d.ProcessData(buf.data(), buf.data(), buf.size());
+}
+
 Loader::ResultStatus NCCHContainer::LoadHeader() {
     if (has_header) {
         return Loader::ResultStatus::Success;
@@ -193,8 +310,9 @@ Loader::ResultStatus NCCHContainer::LoadHeader() {
     }
 
     if (!ncch_header.no_crypto) {
-        // Encrypted NCCH are not supported
-        return Loader::ResultStatus::ErrorEncrypted;
+        if (!SetupDecryption()) {
+            return Loader::ResultStatus::ErrorEncrypted;
+        }
     }
 
     has_header = true;
@@ -278,9 +396,10 @@ Loader::ResultStatus NCCHContainer::Load() {
             block_size = 1;
         }
 
-        if (!ncch_header.no_crypto) {
-            // Encrypted NCCH are not supported
-            return Loader::ResultStatus::ErrorEncrypted;
+        if (!ncch_header.no_crypto && !is_encrypted) {
+            if (!SetupDecryption()) {
+                return Loader::ResultStatus::ErrorEncrypted;
+            }
         }
 
         // System archives and DLC don't have an extended header but have RomFS
@@ -293,6 +412,13 @@ Loader::ResultStatus NCCHContainer::Load() {
 
             if (!read_exheader(file.get())) {
                 return Loader::ResultStatus::Error;
+            }
+
+            if (is_encrypted) {
+                std::vector<u8> exh_buf(sizeof(ExHeader_Header));
+                std::memcpy(exh_buf.data(), &exheader_header, sizeof(ExHeader_Header));
+                DecryptBuffer(exh_buf, NCCHSection::ExHeader, 0);
+                std::memcpy(&exheader_header, exh_buf.data(), sizeof(ExHeader_Header));
             }
 
             const auto mods_path =
@@ -363,6 +489,13 @@ Loader::ResultStatus NCCHContainer::Load() {
             file->Seek(exefs_offset + ncch_offset, SEEK_SET);
             if (file->ReadBytes(&exefs_header, sizeof(ExeFs_Header)) != sizeof(ExeFs_Header))
                 return Loader::ResultStatus::Error;
+
+            if (is_encrypted) {
+                std::vector<u8> exfs_buf(sizeof(ExeFs_Header));
+                std::memcpy(exfs_buf.data(), &exefs_header, sizeof(ExeFs_Header));
+                DecryptBuffer(exfs_buf, NCCHSection::ExeFS, 0);
+                std::memcpy(&exefs_header, exfs_buf.data(), sizeof(ExeFs_Header));
+            }
 
             exefs_file = Reopen(file, filepath);
 
@@ -497,6 +630,12 @@ Loader::ResultStatus NCCHContainer::LoadSectionExeFS(const char* name, std::vect
                     temp_buffer.size())
                     return Loader::ResultStatus::Error;
 
+                if (is_encrypted) {
+                    // .code uses secondary key; offset = ExeFS header + section offset in stream
+                    std::size_t stream_off = sizeof(ExeFs_Header) + section.offset;
+                    DecryptBuffer(temp_buffer, NCCHSection::ExeFSSecondary, stream_off);
+                }
+
                 // Decompress .code section...
                 buffer.resize(LZSS_GetDecompressedSize(temp_buffer));
                 if (!LZSS_Decompress(temp_buffer, buffer)) {
@@ -507,6 +646,16 @@ Loader::ResultStatus NCCHContainer::LoadSectionExeFS(const char* name, std::vect
                 buffer.resize(section_size);
                 if (exefs_file->ReadBytes(buffer.data(), section_size) != section_size)
                     return Loader::ResultStatus::Error;
+
+                if (is_encrypted) {
+                    // "icon" and "banner" use primary key; everything else uses secondary key
+                    bool use_primary = (strncmp(section.name, "icon",   4) == 0 ||
+                                        strncmp(section.name, "banner", 6) == 0);
+                    std::size_t stream_off = sizeof(ExeFs_Header) + section.offset;
+                    DecryptBuffer(buffer,
+                                  use_primary ? NCCHSection::ExeFS : NCCHSection::ExeFSSecondary,
+                                  stream_off);
+                }
             }
 
             return Loader::ResultStatus::Success;
@@ -646,6 +795,13 @@ Loader::ResultStatus NCCHContainer::ReadRomFS(std::shared_ptr<RomFSReader>& romf
 
     std::shared_ptr<RomFSReader> direct_romfs =
         std::make_shared<DirectRomFSReader>(std::move(romfs_file_inner), romfs_offset, romfs_size);
+
+    if (is_encrypted) {
+        // stream_offset = 0x1000: the IVFC header is 0x1000 bytes into the RomFS section's
+        // CTR stream; the data read by direct_romfs starts right after that header.
+        direct_romfs = std::make_shared<DecryptedRomFSReader>(
+            std::move(direct_romfs), secondary_key, romfs_ctr, 0x1000);
+    }
 
     const auto path =
         fmt::format("{}mods/{:016X}/", FileUtil::GetUserPath(FileUtil::UserPath::LoadDir),

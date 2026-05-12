@@ -174,6 +174,9 @@ private:
     void BootGame(const QString& filename);
     void ShutdownGame();
 
+    void StartWebController();
+    void StopWebController();
+
 #ifdef USE_DISCORD_PRESENCE
     void SetDiscordEnabled(bool state);
 #endif

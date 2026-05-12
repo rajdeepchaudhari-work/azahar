@@ -7,8 +7,10 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <QAbstractSocket>
 #include <QFileDialog>
 #include <QFutureWatcher>
+#include <QNetworkInterface>
 #include <QIcon>
 #include <QLabel>
 #include <QMessageBox>
@@ -109,6 +111,7 @@
 #include "core/savestate.h"
 #include "core/system_titles.h"
 #include "input_common/main.h"
+#include "input_common/web_input/web_input.h"
 #include "network/network_settings.h"
 #include "ui_main.h"
 #include "video_core/gpu.h"
@@ -1602,13 +1605,66 @@ void GMainWindow::BootGame(const QString& filename) {
         ShowFullscreen();
     }
 
+    StartWebController();
     OnResumeGame(true);
+}
+
+void GMainWindow::StartWebController() {
+    auto* server = InputCommon::GetWebInputServer();
+    if (!server)
+        return;
+
+    constexpr u16 WEB_CONTROLLER_PORT = 9753;
+    if (!server->Start(InputCommon::GetKeyboard(), render_window, WEB_CONTROLLER_PORT)) {
+        LOG_WARNING(Frontend, "Web controller: failed to start server on port {}",
+                    WEB_CONTROLLER_PORT);
+        return;
+    }
+
+    QString local_ip = QStringLiteral("localhost");
+    const auto ifaces = QNetworkInterface::allInterfaces();
+    for (const auto& iface : ifaces) {
+        if (iface.flags().testFlag(QNetworkInterface::IsLoopBack))
+            continue;
+        if (!iface.flags().testFlag(QNetworkInterface::IsUp))
+            continue;
+        for (const auto& entry : iface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                local_ip = entry.ip().toString();
+                break;
+            }
+        }
+        if (local_ip != QStringLiteral("localhost"))
+            break;
+    }
+
+    const QString url =
+        QStringLiteral("http://%1:%2").arg(local_ip).arg(server->GetPort());
+    LOG_INFO(Frontend, "Web controller started: {}", url.toStdString());
+
+    message_label->setText(
+        tr("Web Controller: <a href=\"%1\">%1</a>  (open on your phone)").arg(url));
+    message_label->setOpenExternalLinks(true);
+}
+
+void GMainWindow::StopWebController() {
+    auto* server = InputCommon::GetWebInputServer();
+    if (server && server->IsRunning()) {
+        server->Stop();
+        LOG_INFO(Frontend, "Web controller stopped");
+    }
+    if (message_label) {
+        message_label->clear();
+        message_label->setOpenExternalLinks(false);
+    }
 }
 
 void GMainWindow::ShutdownGame() {
     if (!emulation_running) {
         return;
     }
+
+    StopWebController();
 
     if (ui->action_Fullscreen->isChecked()) {
         HideFullscreen();

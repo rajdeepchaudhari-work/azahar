@@ -367,7 +367,7 @@ if (ENABLE_QT)
         download_qt(6.9.3)
     endif()
 
-    find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia Concurrent)
+    find_package(Qt6 REQUIRED COMPONENTS Widgets Multimedia Concurrent Network)
 
     if (UNIX AND NOT APPLE)
         find_package(Qt6 REQUIRED COMPONENTS DBus)

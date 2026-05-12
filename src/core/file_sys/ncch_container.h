@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -359,6 +360,25 @@ public:
 private:
     std::unique_ptr<FileUtil::IOFile> Reopen(const std::unique_ptr<FileUtil::IOFile>& orig_file,
                                              const std::string& new_filename = "");
+
+    // Called once after the NCCH header confirms encryption; returns false if keys are missing.
+    bool SetupDecryption();
+
+    using AESKey = std::array<u8, 16>;
+
+    enum class NCCHSection { ExHeader, ExeFS, ExeFSSecondary, RomFS };
+
+    // Decrypt an in-memory buffer read from a given section.
+    // offset_in_section is bytes from the start of that section's CTR stream.
+    void DecryptBuffer(std::vector<u8>& buf, NCCHSection section,
+                       std::size_t offset_in_section = 0);
+
+    bool is_encrypted = false;
+    AESKey primary_key{};
+    AESKey secondary_key{};
+    AESKey exheader_ctr{};
+    AESKey exefs_ctr{};
+    AESKey romfs_ctr{};
 
     bool has_header = false;
     bool has_exheader = false;

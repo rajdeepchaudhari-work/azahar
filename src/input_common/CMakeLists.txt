@@ -18,6 +18,8 @@ add_library(input_common STATIC EXCLUDE_FROM_ALL
     udp/protocol.h
     udp/udp.cpp
     udp/udp.h
+    web_input/web_input.cpp
+    web_input/web_input.h
 )
 
 if(ENABLE_SDL2)
@@ -42,7 +44,7 @@ if(ENABLE_LIBUSB)
 endif()
 
 create_target_directory_groups(input_common)
-target_link_libraries(input_common PUBLIC citra_core PRIVATE citra_common ${Boost_LIBRARIES})
+target_link_libraries(input_common PUBLIC citra_core PRIVATE citra_common ${Boost_LIBRARIES} httplib json-headers)
 
 if (CITRA_USE_PRECOMPILED_HEADERS)
     target_precompile_headers(input_common PRIVATE precompiled_headers.h)

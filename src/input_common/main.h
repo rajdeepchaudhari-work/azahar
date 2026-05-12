@@ -12,6 +12,10 @@ namespace Common {
 class ParamPackage;
 }
 
+namespace InputCommon::WebInput {
+class Server;
+} // namespace InputCommon::WebInput
+
 namespace InputCommon {
 
 /// Initializes and registers all built-in input device factories.
@@ -42,6 +46,9 @@ Common::ParamPackage GetControllerAnalogBinds(const Common::ParamPackage& params
 
 /// Reloads the input devices
 void ReloadInputDevices();
+
+/// Gets the web input server (created during Init, call Start to activate it).
+WebInput::Server* GetWebInputServer();
 
 namespace Polling {
 
